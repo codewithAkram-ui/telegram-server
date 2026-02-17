@@ -65,7 +65,7 @@ async def get_channel_messages(channel_link, keyword):
     messages = []
     
     # Iterate through messages
-    async for message in client.iter_messages(entity, limit=30):
+    async for message in client.iter_messages(entity, limit=200):
         if message.text and keyword.lower() in message.text.lower():
             
             msg_data = {
@@ -121,3 +121,4 @@ def analyze():
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port)
+
