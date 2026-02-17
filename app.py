@@ -1,59 +1,102 @@
 import os
+import mimetypes
 from flask import Flask, request, jsonify
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 from flask_cors import CORS
 import asyncio
 
-app = Flask(__name__)
+app = Flask(__name__, static_folder='static')
 CORS(app)
 
 # ==========================================
-# 👇 RENDER CONFIGURATION 👇
-# We get these values from Render's "Environment Variables" section
-# This keeps your keys secure and allows the code to run in the cloud.
+# 👇 CONFIGURATION 👇
+# Get keys from Environment Variables (Render)
+api_id = os.environ.get('API_ID')
+api_hash = os.environ.get('API_HASH')
+session_string = os.environ.get('SESSION_STRING')
 
-# 1. API ID (Must be an integer)
-api_id = os.environ.get('39075546')
+# Convert API_ID to integer if it exists
 if api_id:
-    api_id = int(api_id)
-
-# 2. API HASH
-api_hash = os.environ.get('7f3c6f5a4102feb04019f2998348d29f')
-
-# 3. SESSION STRING
-session_string = os.environ.get('1BVtsOIQBu7rejII9bVEvOtgmyr6ZwNFH7qmSHEr23IghEQPklhOle8h25lW2owtTA6EjFaYmDt3SDOMcsriQtKtRfyVcCXXWhnU9Cw0bncGiyhnuTO3mZvzykvvMsw3K8AW88_Str11Ni5FayPFXstvmioFy86d56K_ZUnhZu77WLWcjqgntB1HO5CbKpcPwUjqybcTaYWF6gRLw7u6LPexT24GkHyuSWH43_kWG3-dVVTTF_z5Skt5sxzGSb5k5i69nyzPRUE8DAx4NQaorLwbq_EdAhHK8CiaRvJAIQ3Iih--ZoJPsI4USzZ-PjROKhlOlLCgOGPFubmV5KXQqr384ZgQ5gnQ=')
+    try:
+        api_id = int(api_id)
+    except ValueError:
+        print("❌ ERROR: API_ID must be a number.")
+        api_id = None
 # ==========================================
+
+# Create download folder
+DOWNLOAD_FOLDER = 'static/media'
+os.makedirs(DOWNLOAD_FOLDER, exist_ok=True)
 
 # Initialize Loop
 loop = asyncio.new_event_loop()
 asyncio.set_event_loop(loop)
 
-# Connect to Telegram
-# We check if keys exist to prevent crashing during the build process
+# Initialize Client variable as None first
+client = None
+
+# Attempt to connect
 if api_id and api_hash and session_string:
-    client = TelegramClient(StringSession(session_string), api_id, api_hash, loop=loop)
-    client.start()
+    try:
+        client = TelegramClient(StringSession(session_string), api_id, api_hash, loop=loop)
+        client.start()
+        print("✅ Telegram Client Started Successfully!")
+    except Exception as e:
+        print(f"❌ Failed to start Telegram Client: {e}")
 else:
-    print("⚠️ WARNING: Credentials missing. This is normal during the 'Build' phase on Render.")
+    print("⚠️ WARNING: Missing Credentials! 'client' was not created.")
+    print(f"   API_ID: {api_id} (Needs to be int)")
+    print(f"   API_HASH: {'Found' if api_hash else 'Missing'}")
+    print(f"   SESSION_STRING: {'Found' if session_string else 'Missing'}")
 
 async def get_channel_messages(channel_link, keyword):
+    # 👇 SAFETY CHECK: If client is not defined, stop here.
+    if client is None:
+        raise Exception("Server Error: Telegram Client is not active. Check server logs for missing credentials.")
+
     if not client.is_connected():
         await client.connect()
         
-    # Resolve channel (handle both t.me/links and usernames)
+    # Resolve channel
     channel_username = channel_link.split('/')[-1] if 't.me/' in channel_link else channel_link
     entity = await client.get_entity(channel_username)
     
     messages = []
-    # Fetch last 100 messages
-    async for message in client.iter_messages(entity, limit=100):
+    
+    # Iterate through messages
+    async for message in client.iter_messages(entity, limit=30):
         if message.text and keyword.lower() in message.text.lower():
-            messages.append({
+            
+            msg_data = {
                 'id': message.id,
                 'date': str(message.date),
-                'text': message.text
-            })
+                'text': message.text,
+                'media_type': None,
+                'media_url': None
+            }
+
+            if message.media:
+                try:
+                    path = await client.download_media(message, file=DOWNLOAD_FOLDER)
+                    if path:
+                        filename = os.path.basename(path)
+                        # We use /static/media/filename for the URL
+                        msg_data['media_url'] = f'/static/media/{filename}'
+                        
+                        mime_type, _ = mimetypes.guess_type(path)
+                        if mime_type:
+                            if 'image' in mime_type: msg_data['media_type'] = 'image'
+                            elif 'video' in mime_type: msg_data['media_type'] = 'video'
+                            elif 'audio' in mime_type: msg_data['media_type'] = 'audio'
+                            else: msg_data['media_type'] = 'file'
+                        else:
+                            msg_data['media_type'] = 'file'
+                except Exception as e:
+                    print(f"Error downloading media: {e}")
+
+            messages.append(msg_data)
+            
     return messages
 
 @app.route('/analyze', methods=['POST'])
@@ -66,13 +109,15 @@ def analyze():
         return jsonify({'error': 'Missing data'}), 400
 
     try:
-        # Run the async telethon function
+        # Check client again before running async loop
+        if client is None:
+            return jsonify({'error': 'Server Configuration Error: Telegram keys are missing.'}), 500
+
         messages = loop.run_until_complete(get_channel_messages(channel_link, keyword))
         return jsonify({'messages': messages})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
-    # Render assigns a port automatically via the PORT environment variable
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port)
